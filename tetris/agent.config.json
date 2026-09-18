@@ -1,0 +1,10 @@
+{
+  "_comment": "Settings for jev-tetris-agent. CLI flags override these. Keys use the CLI flag names.",
+  "target-level": 0,
+  "target-score": 0,
+  "max-seconds": 120,
+  "runs": 0,
+  "start-level": 1,
+  "candidates": 6,
+  "linger": 3
+}

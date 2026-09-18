@@ -1,0 +1,25 @@
+{
+  "name": "jev-tetris-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Plays the official Tetris at play.tetris.com in your Chrome, with TypeSafe's Jev model choosing every placement in real time.",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "play": "node src/main.ts",
+    "print-request": "node src/main.ts --print-request",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@typesafe-ai/sdk": "^0.6.0",
+    "playwright-core": "^1.63.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

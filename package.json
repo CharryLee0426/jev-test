@@ -1,0 +1,27 @@
+{
+  "name": "jev-test",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Testing TypeSafe's Jev model on real-time browser games. One folder per game, launched from here.",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "workspaces": [
+    "flappy-bird",
+    "tetris"
+  ],
+  "scripts": {
+    "play": "node play.ts",
+    "list": "node play.ts --list",
+    "check-key": "node play.ts --check-key",
+    "flappy-bird": "node play.ts flappy-bird",
+    "test": "npm test --workspaces --if-present",
+    "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck --workspaces --if-present",
+    "tetris": "node play.ts tetris"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

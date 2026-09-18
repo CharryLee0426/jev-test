@@ -1,0 +1,6 @@
+{
+  "name": "flappy-bird",
+  "title": "Flappy Bird (flappybird.io)",
+  "description": "Jev chooses every maneuver in real time; code reads the game, does the physics and executes the flaps.",
+  "entry": "src/main.ts"
+}

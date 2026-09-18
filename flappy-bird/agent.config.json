@@ -1,0 +1,8 @@
+{
+  "_comment": "Settings for jev-flappy-agent. CLI flags override these. Keys use the CLI flag names.",
+  "max-seconds": 60,
+  "target-score": 20,
+  "runs": 0,
+  "linger": 3,
+  "ranked": false
+}

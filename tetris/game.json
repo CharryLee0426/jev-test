@@ -1,0 +1,6 @@
+{
+  "name": "tetris",
+  "title": "Tetris (play.tetris.com)",
+  "description": "Jev chooses where every Tetrimino goes in real time; code reads the board, simulates the candidates and presses the keys. Ads are waited out and closed, never clicked.",
+  "entry": "src/main.ts"
+}
