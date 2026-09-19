@@ -10,10 +10,11 @@
 import { parseArgs } from "node:util";
 import { createWriteStream, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { visibleAdElements } from "./ad-block.ts";
 import { AdHandler } from "./ads.ts";
 import { Agent, type StopReason } from "./agent.ts";
 import { JevBrain, buildJevRequest, describeApiError } from "./brain-jev.ts";
-import { connectPageAgent, openGame } from "./browser.ts";
+import { connectPageAgent, openGame, type GameSession } from "./browser.ts";
 import { describeObjective, describeStopConditions, loadConfigFile, mergeConfig, parseConfigObject, type AgentConfig } from "./config.ts";
 import { Hud } from "./hud.ts";
 import { describeSituation, planCandidates, type PiecesInPlay } from "./planner.ts";
@@ -41,6 +42,7 @@ Decision making
 Game and browser
   --start-level <n>        Level to start each game at (default: 1)
   --key-delay <ms>         Delay between key presses (default: 16)
+  --no-ad-block            Do not remove ads; wait them out and close them with their own controls instead
   --ad-timeout <s>         Wait this long for an ad's own close control before the fallback (default: 90; 0 = forever)
   --restart-delay <ms>     Pause on the game-over screen before the next game (default: 2000)
   --url <url>              Game URL (default: https://play.tetris.com/)
@@ -53,6 +55,7 @@ Other
   --log <file>             Append every decision, execution and game summary as JSON lines
   --print-request          Print one Jev request for a sample situation and exit
   --check-key              Validate TYPESAFE_API_KEY by listing models and exit
+  --check-ads              Open the game, report what ad removal did and exit (no API key needed)
   -h, --help               Show this help
 `;
 
@@ -97,6 +100,75 @@ function sampleRequest(cfg: AgentConfig) {
   });
 }
 
+/**
+ * Opens the game and reports what ad removal did: what was blocked, how long
+ * the first menu took, whether anything ad-shaped is still on screen, and how
+ * the preroll the site plays before every later game was dealt with. Needs no
+ * API key, so it can be run on its own (`--check-ads --no-ad-block` measures
+ * the same page with ad removal turned off).
+ */
+async function checkAds(cfg: AgentConfig): Promise<void> {
+  const out = (line: string): void => void process.stdout.write(`${line}\n`);
+  const started = Date.now();
+  const since = (t: number): string => `${((Date.now() - t) / 1000).toFixed(1)}s`;
+  out(`Opening ${cfg.url} with ad removal ${cfg.adBlock ? "on" : "off"}...`);
+  let session: GameSession | null = null;
+  try {
+    session = await openGame({ url: cfg.url, cdpUrl: cfg.cdp, channel: cfg.channel, headless: cfg.headless, width: 1080, height: 820, blockAds: cfg.adBlock });
+    const page = session.page;
+    const milestones: string[] = [];
+    page.on("console", (m) => {
+      const t = m.text();
+      if (/\[Game\]|\[TetrisGame\]|\[VastPreroll\]/.test(t)) milestones.push(`  ${since(started).padStart(6)}  ${t.slice(0, 96)}`);
+    });
+    const control = await connectPageAgent(page, { pushIntervalMs: 500, keyDelayMs: cfg.keyDelay }, () => {});
+    // The old choreography runs either way, so both modes get the same help;
+    // with ad removal on it should have nothing left to do.
+    const ads = new AdHandler(page, control, { adTimeoutMs: cfg.adTimeout * 1000, adsRemoved: cfg.adBlock });
+
+    let menuAt: number | null = null;
+    while (Date.now() - started < 120_000) {
+      await ads.tick();
+      if ((await control.sceneName()) === "mainMenu") {
+        menuAt = Date.now();
+        break;
+      }
+      await page.waitForTimeout(250);
+    }
+    out(menuAt === null ? "\nThe main menu was not reached within 120s." : `\nMain menu reached after ${((menuAt - started) / 1000).toFixed(1)}s, with no clicks on any ad.`);
+
+    // The preroll the site plays before every later game, triggered the way
+    // the game itself triggers it.
+    if (menuAt !== null) {
+      const askedAt = Date.now();
+      let doneAt: number | null = null;
+      page.on("console", (m) => {
+        if (doneAt === null && /\[Game\] Preroll complete, showing game menu/.test(m.text())) doneAt = Date.now();
+      });
+      await control.frame().evaluate(() => window.showGameAreaAd?.("next")).catch(() => {});
+      while (doneAt === null && Date.now() - askedAt < 90_000) {
+        await ads.tick();
+        await page.waitForTimeout(200);
+      }
+      out(doneAt === null ? "Preroll before a later game: still not over after 90s." : `Preroll before a later game: over in ${(((doneAt as number) - askedAt) / 1000).toFixed(1)}s.`);
+    }
+
+    const visible = await visibleAdElements(page);
+    out(visible.length === 0 ? "No ad element is visible anywhere in the page." : `Still visible: ${visible.map((v) => `${v.what} (${v.frame})`).join(", ")}`);
+    if (session.adBlock) {
+      const report = await session.adBlock.report(page);
+      out(session.adBlock.describe(report));
+      for (const h of report.hosts.slice(0, 12)) out(`  blocked ${String(h.count).padStart(3)} x ${h.host} (${h.rule})`);
+    } else {
+      out("Ad removal was off, so nothing was blocked.");
+    }
+    out(`The site's own ad controls used: interstitials closed ${ads.status.interstitialsClosed}, click-to-play ${ads.status.overlaysClicked}, skips ${ads.status.skipsClicked}, fallbacks ${ads.status.fallbacks}.`);
+    if (milestones.length > 0) out(`\nWhat the page reported:\n${milestones.join("\n")}`);
+  } finally {
+    await session?.close();
+  }
+}
+
 async function main(): Promise<void> {
   loadDotEnv();
   const { values } = parseArgs({
@@ -116,6 +188,7 @@ async function main(): Promise<void> {
       "start-level": { type: "string" },
       "key-delay": { type: "string" },
       "ad-timeout": { type: "string" },
+      "no-ad-block": { type: "boolean" },
       "restart-delay": { type: "string" },
       url: { type: "string" },
       cdp: { type: "string" },
@@ -125,6 +198,7 @@ async function main(): Promise<void> {
       log: { type: "string" },
       "print-request": { type: "boolean", default: false },
       "check-key": { type: "boolean", default: false },
+      "check-ads": { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
     allowNegative: false,
@@ -151,6 +225,7 @@ async function main(): Promise<void> {
     "start-level": values["start-level"],
     "key-delay": values["key-delay"],
     "ad-timeout": values["ad-timeout"],
+    "ad-block": values["no-ad-block"] ? false : undefined,
     "restart-delay": values["restart-delay"],
     url: values.url,
     cdp: values.cdp,
@@ -162,6 +237,11 @@ async function main(): Promise<void> {
 
   if (values["print-request"]) {
     process.stdout.write(JSON.stringify({ model: cfg.model ?? "jev-latest", ...sampleRequest(cfg) }, null, 2) + "\n");
+    return;
+  }
+
+  if (values["check-ads"]) {
+    await checkAds(cfg);
     return;
   }
 
@@ -179,12 +259,17 @@ async function main(): Promise<void> {
 
   const hud = new Hud();
   hud.println(`Settings: ${configPath ? `${configPath} + flags` : "defaults + flags"}. ${describeStopConditions(cfg)}. Games start at level ${cfg.startLevel}.`);
-  hud.println(`Opening ${cfg.url} in ${cfg.cdp ? `Chrome at ${cfg.cdp}` : `Google Chrome (${cfg.channel})`}... Ads are waited out and closed with their own controls, never clicked.`);
-  const session = await openGame({ url: cfg.url, cdpUrl: cfg.cdp, channel: cfg.channel, headless: cfg.headless, width: 1080, height: 820 });
+  hud.println(
+    `Opening ${cfg.url} in ${cfg.cdp ? `Chrome at ${cfg.cdp}` : `Google Chrome (${cfg.channel})`}... ` +
+      (cfg.adBlock
+        ? "Ads are removed: their traffic is blocked and the site's own ad callbacks are answered in code."
+        : "Ad removal is off: ads are waited out and closed with their own controls, never clicked."),
+  );
+  const session = await openGame({ url: cfg.url, cdpUrl: cfg.cdp, channel: cfg.channel, headless: cfg.headless, width: 1080, height: 820, blockAds: cfg.adBlock, log });
 
   let agent: Agent | null = null;
   const control = await connectPageAgent(session.page, { pushIntervalMs: 250, keyDelayMs: cfg.keyDelay }, (snap) => agent?.onSnapshot(snap));
-  const ads = new AdHandler(session.page, control, { adTimeoutMs: cfg.adTimeout * 1000, log });
+  const ads = new AdHandler(session.page, control, { adTimeoutMs: cfg.adTimeout * 1000, adsRemoved: cfg.adBlock, log });
   agent = new Agent(control, ads, { brain, config: cfg, postureConfidenceFloor: 0.5, log });
   hud.println(`Brain: ${brain.name}. Keep the game window visible; press Ctrl+C to stop.`);
   hud.start(() => agent!.status());
@@ -221,8 +306,12 @@ async function main(): Promise<void> {
         `Games: ${runs.length} (${runs.map((r) => `score ${r.score} / level ${r.level} / ${r.lines} lines`).join("; ") || "none"}), best score ${best}. ` +
           `Jev answers ${st.stats.answers}, applied ${st.stats.applied} (pre-planned ${st.stats.preplanHits}), stale ${st.stats.stale}, late ${st.stats.late}, vetoed ${st.stats.vetoed}, ` +
           `errors ${st.stats.errors}, input tokens ${st.stats.inputTokens}. Pieces placed by Jev ${st.stats.placedByJev}, by code ${st.stats.placedByCode}, failed executions ${st.stats.execFailed}. ` +
-          `Ads: interstitials closed ${ads.status.interstitialsClosed}, click-to-play ${ads.status.overlaysClicked}, skips ${ads.status.skipsClicked}, fallbacks ${ads.status.fallbacks}.`,
+          `Ads handled by the safety net: interstitials closed ${ads.status.interstitialsClosed}, click-to-play ${ads.status.overlaysClicked}, skips ${ads.status.skipsClicked}, fallbacks ${ads.status.fallbacks}.`,
       );
+      if (session.adBlock) {
+        const report = await session.adBlock.report(session.page).catch(() => null);
+        if (report) hud.println(session.adBlock.describe(report));
+      }
     }
     logStream?.end();
     if (reason !== "manual" && cfg.linger > 0 && !session.attached) {

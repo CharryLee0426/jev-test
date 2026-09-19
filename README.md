@@ -41,8 +41,10 @@ node play.ts tetris --target-score 30000       # ...or a score
 node play.ts tetris --play-seconds 120         # ...or after two minutes
 ```
 
-The Tetris site shows ads before the game and between games; the agent waits them out and closes them
-with their own close controls (never clicking an ad), see `tetris/README.md`.
+The Tetris site shows ads on the page, over the game area and before every game. They are removed in
+code (blocked traffic plus shims that answer the site's own ad callbacks), so no ad loads and nothing
+is waited out; `node play.ts tetris --check-ads` reports what was removed and `--no-ad-block` turns it
+off. See `tetris/README.md`.
 
 The launcher loads `.env` from this folder, then starts the game's entry with the game's folder as
 the working directory, so each game's own config file applies. Ctrl+C stops the game and prints its

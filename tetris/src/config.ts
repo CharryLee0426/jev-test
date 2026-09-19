@@ -34,6 +34,8 @@ export interface AgentConfig {
   keyDelay: number;
   /** Seconds to wait for an ad's own close control before the fallback that tells the page the ad is over; 0 = wait forever. */
   adTimeout: number;
+  /** Remove ads in code: block their traffic and answer the site's ad callbacks (see ad-block.ts). */
+  adBlock: boolean;
   /** Pause on the game-over screen before starting the next game, in ms. */
   restartDelay: number;
   url: string;
@@ -59,6 +61,7 @@ export const DEFAULT_CONFIG: AgentConfig = {
   fallback: true,
   keyDelay: 16,
   adTimeout: 90,
+  adBlock: true,
   restartDelay: 2000,
   url: "https://play.tetris.com/",
   channel: "chrome",
@@ -68,7 +71,7 @@ export const DEFAULT_CONFIG: AgentConfig = {
 const NUMBER_KEYS = new Set<keyof AgentConfig>([
   "targetLevel", "targetScore", "maxSeconds", "runs", "linger", "startLevel", "candidates", "timeout", "latencyGuess", "keyDelay", "adTimeout", "restartDelay",
 ]);
-const BOOLEAN_KEYS = new Set<keyof AgentConfig>(["preplan", "fallback", "headless"]);
+const BOOLEAN_KEYS = new Set<keyof AgentConfig>(["preplan", "fallback", "headless", "adBlock"]);
 const STRING_KEYS = new Set<keyof AgentConfig>(["model", "url", "cdp", "channel", "log"]);
 /** Aliases accepted in files and on the CLI. */
 const ALIASES: Record<string, keyof AgentConfig> = {
@@ -78,6 +81,7 @@ const ALIASES: Record<string, keyof AgentConfig> = {
   score: "targetScore",
   level: "targetLevel",
   games: "runs",
+  blockAds: "adBlock",
 };
 
 /** "target-level" -> "targetLevel"; camelCase passes through. */

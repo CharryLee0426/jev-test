@@ -42,26 +42,58 @@ then flags. The shipped file:
   "runs": 0,
   "start-level": 1,
   "candidates": 6,
-  "linger": 3
+  "linger": 3,
+  "ad-block": true
 }
 ```
 
-## Ads: waited out and closed, never clicked
+## Ads: removed in code
 
-The site shows ads in three places, and the agent treats every one of them the same way: wait, then
-use the ad's own close control; never click the creative.
+The site shows ads in four places: banner rails down both sides of the page, an AdSense
+interstitial over the game area on first load, a click-to-play layer that starts a video, and another
+video before every later game. All of them are gone by default (`--no-ad-block` brings them back),
+removed by `src/ad-block.ts` in three layers, installed before the page's first byte is parsed. No
+browser extension, no filter-list subscription, nothing to install.
 
-1. **Interstitial in the game frame** (AdSense, first load). Its "Close ad" control has a countdown;
-   the agent watches that control inside Google's ad frame and clicks it, and only it, once the
-   countdown is over.
-2. **Click-to-play layer** (the site's own transparent layer over the game). One click on the site's
-   layer starts a video preroll; the agent waits for the video to finish. If the player offers a
-   "Skip" control it is used, otherwise the video simply plays out (15 to 30 s).
-3. **Video before every later game**. Same as above, without the click. (A qualifying score first shows the game's own high-score screen; the agent leaves it through that screen's Done action, keeping the default initials.)
+1. **Their traffic is blocked.** Every request is matched against a list of ad hosts and URL shapes
+   (`matchAdRule`, unit-tested) and aborted: AdSense, GPT, the IMA video SDK, creative hosting, the
+   header-bidding exchanges this site sells through, the cookie syncs they fire at each other, and
+   Google's anti-ad-blocker wall. The game's own origin is never blocked.
+2. **The site's ad callbacks are answered in code.** Blocking alone would leave the game waiting,
+   because it only shows its menu once the ad SDKs report back. So the shims answer for them, using
+   the page's own protocol:
+   - `window.adsbygoogle`, in the game frame, is a queue that answers `adConfig({onReady})` and
+     `adBreak({adBreakDone})` at once with "no ad delivered", which is the path the game already
+     takes when Google has nothing to show. Its own fallback would spend 6 s waiting first.
+   - The preroll handshake is answered in the parent. The game frame posts `gameLoaderComplete`
+     (first load) or `playVastPreroll` (later games) and waits for `prerollComplete` /
+     `vastPrerollComplete` to come back; the shim replies immediately and stops the message from
+     reaching the site's video component, so the click-to-play layer and the video are never created.
+   - `window.googletag` is an inert stub, so page and game code that calls into GPT finds the shape
+     it expects instead of throwing.
+3. **Whatever still reaches the DOM is hidden.** A stylesheet and a MutationObserver keep AdSense
+   ins tags, GPT slots, ad iframes, the in-game ad div and Taboola widgets out of the layout, so
+   nothing flashes up and no empty boxes are left behind.
 
-If an interstitial never offers a close control, the agent waits `--ad-timeout` seconds (default 90)
-and then tells the page that the ad is over through the page's own completion callback, so a session
-cannot hang forever. That fallback is counted in the summary (`fallbacks`) and logged.
+Measured against the live site with `--check-ads`, first load to a usable menu and the preroll the
+site plays before every later game:
+
+| | Ads removed (default) | `--no-ad-block` |
+| --- | --- | --- |
+| First menu | 5.5 s, no clicks | 5.0 s, with an 800x600 AdSense interstitial over the game |
+| Preroll before a later game | 0.0 s | 34.3 s of video |
+| Ad elements on screen | none | 4 banner slots (300x250, 160x600) plus the interstitial |
+| Ad requests | 6, all aborted | all of them served |
+
+```bash
+node src/main.ts --check-ads                 # what ad removal did, no API key needed
+node src/main.ts --check-ads --no-ad-block   # the same page with the ads left in
+```
+
+`src/ads.ts` stays in place as the safety net and is what `--no-ad-block` uses: it waits ads out and
+closes them with their own close controls, never clicking a creative, and after `--ad-timeout`
+seconds tells the page the ad is over through the page's own completion callback. With ad removal on
+it has nothing to do, and the session summary says so.
 
 ## How the work is split (and why)
 
@@ -134,7 +166,8 @@ game 1 | play | score 16670 | level 5 (10 to next) | pieces 80 lines 40 | goal 2
 | `--no-preplan` | off | Ask only when a piece has spawned (one round trip on the critical path). |
 | `--no-fallback` | off | Never let code place a piece; the piece falls on its own while waiting. |
 | `--key-delay <ms>` | 16 | Delay between key presses. |
-| `--ad-timeout <s>` | 90 | Wait for an ad's own close control this long before the fallback; 0 = forever. |
+| `--no-ad-block` | off | Leave the ads in and fall back to waiting them out (see above). |
+| `--ad-timeout <s>` | 90 | Safety net only: wait for an ad's own close control this long before the fallback; 0 = forever. |
 | `--cdp http://localhost:9222` | | Attach to a Chrome you started with `--remote-debugging-port=9222`. |
 | `--log <file>` | | JSON lines: every decision (situation, all candidates, Jev's probabilities and confidence), every execution, every ad action and a summary per game. |
 | `--print-request` | | Print one complete Jev request for a sample board. Paste it into the [Playground](https://console.typesafe.ai/playground). |
@@ -183,7 +216,8 @@ src/brain-jev.ts    builds the TypeSafe request and calls the SDK
 src/planner.ts      candidate placements, lookahead, plain-language descriptions, posture weights
 src/tetris.ts       board model: shapes, drops, line clears, features, heuristic
 src/page-agent.ts   script injected into the game frame: snapshots, key presses, plan execution
-src/ads.ts          the ad choreography (close controls only, never the creative)
+src/ad-block.ts     ad removal: blocked hosts, the shims that answer the site's ad callbacks
+src/ads.ts          the ad choreography used as the safety net (close controls only, never the creative)
 src/browser.ts      Playwright launch/attach, game frame lookup, page wiring
 src/hud.ts          status line
 test/               node:test suites for the board model, planner and config

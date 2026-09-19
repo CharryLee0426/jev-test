@@ -6,5 +6,6 @@
   "runs": 0,
   "start-level": 1,
   "candidates": 6,
-  "linger": 3
+  "linger": 3,
+  "ad-block": true
 }

@@ -3,8 +3,13 @@
  * game's iframe and wires the in-page agent to Node. Two ways to get a browser:
  *  - launch the installed Google Chrome (default, separate profile);
  *  - attach to a Chrome you already run with --remote-debugging-port.
+ *
+ * Ad blocking (see ad-block.ts) is installed on the page before the first
+ * navigation, because the shims have to be in place before the site's own
+ * scripts run.
  */
 import { chromium, type Browser, type BrowserContext, type Frame, type Page } from "playwright-core";
+import { AdBlocker } from "./ad-block.ts";
 import { installPageAgent, type PageConstants, type PagePlan, type PageSnapshot } from "./page-agent.ts";
 
 export interface BrowserOptions {
@@ -14,12 +19,17 @@ export interface BrowserOptions {
   headless: boolean;
   width: number;
   height: number;
+  /** Block ad traffic and answer the site's ad callbacks in code. */
+  blockAds: boolean;
+  log?: (event: Record<string, unknown>) => void;
 }
 
 export interface GameSession {
   browser: Browser;
   page: Page;
   attached: boolean;
+  /** Null when ad blocking is turned off. */
+  adBlock: AdBlocker | null;
   close(): Promise<void>;
 }
 
@@ -41,11 +51,13 @@ export async function openGame(opts: BrowserOptions): Promise<GameSession> {
     context = await browser.newContext({ viewport: { width: opts.width, height: opts.height } });
   }
   const page = await context.newPage();
+  const adBlock = opts.blockAds ? await AdBlocker.install(page, { log: opts.log }) : null;
   await page.goto(opts.url, { waitUntil: "domcontentloaded" });
   return {
     browser,
     page,
     attached,
+    adBlock,
     async close() {
       if (attached) {
         await page.close().catch(() => {});

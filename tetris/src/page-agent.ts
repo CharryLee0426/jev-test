@@ -91,6 +91,8 @@ declare global {
     __tetrisPush?: (snapshot: PageSnapshot) => void;
     isGameAreaAdActive?: () => boolean;
     onGameAreaAdComplete?: () => void;
+    /** The game's own "show the ad before the next game" entry point ('preroll' on first load, 'next' afterwards). */
+    showGameAreaAd?: (type?: string) => void;
   }
 }
 

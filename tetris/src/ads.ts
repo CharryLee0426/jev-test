@@ -16,6 +16,10 @@
  * As a last resort, after `adTimeoutMs` with an interstitial that never
  * offered a close control, the page's own completion callback is invoked so
  * the session cannot hang forever. That fallback is counted and logged.
+ *
+ * With ad removal on (ad-block.ts, the default) none of this normally runs:
+ * no ad is loaded and no preroll is played. This stays as the safety net for
+ * `--no-ad-block` and for the day the site changes its ad handshake.
  */
 import type { Frame, Page } from "playwright-core";
 import type { PageControl } from "./browser.ts";
@@ -38,6 +42,12 @@ export interface AdStatus {
 
 export interface AdHandlerOptions {
   adTimeoutMs: number;
+  /**
+   * True when ad-block.ts is removing the ads. The preroll handshake is then
+   * answered inside the page, usually before this listener exists, so there
+   * is no "preroll complete" line left to wait for: start out as done.
+   */
+  adsRemoved?: boolean;
   log?: (event: Record<string, unknown>) => void;
 }
 
@@ -71,6 +81,10 @@ export class AdHandler {
     this.page = page;
     this.control = control;
     this.opts = opts;
+    if (opts.adsRemoved) {
+      this.status.prerollDone = true;
+      this.status.message = "ads removed in code; nothing to wait for";
+    }
     page.on("console", (m) => {
       const t = m.text();
       if (/\[Game\] Preroll complete|\[VastPreroll\] Ad finished|\[TetrisGame\] Preroll complete/.test(t)) {
