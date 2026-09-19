@@ -87,6 +87,10 @@ export async function waitForGameFrame(page: Page, timeoutMs = 60000): Promise<F
 export interface PageControl {
   frame(): Frame;
   execute(plan: PagePlan): Promise<void>;
+  /** Leaves a plan in the page to run the instant the expected piece spawns; null cancels it. */
+  arm(plan: PagePlan | null): Promise<void>;
+  /** Sends one key, for the last-resort case where no plan could be made at all. */
+  press(key: "left" | "right" | "cw" | "ccw" | "soft" | "hard" | "hold"): Promise<void>;
   startGame(levelIndex: number): Promise<{ ok: boolean; reason?: string; scene: string }>;
   sceneName(): Promise<string>;
   adFallbackComplete(): Promise<boolean>;
@@ -119,6 +123,8 @@ export async function connectPageAgent(page: Page, constants: PageConstants, onS
   return {
     frame: () => frame,
     execute: (plan: PagePlan) => evalAgent((api, p) => api.execute(p as PagePlan), plan).catch(() => {}),
+    arm: (plan: PagePlan | null) => evalAgent((api, p) => api.arm(p as PagePlan | null), plan).catch(() => {}),
+    press: (key) => evalAgent((api, k) => api.press(k as "hard"), key).catch(() => {}),
     startGame: (levelIndex: number) => evalAgent((api, l) => api.startGame(l as number), levelIndex).catch((err: Error) => ({ ok: false, reason: `page call failed: ${err.message}`, scene: "unknown" })),
     sceneName: () => evalAgent((api) => api.sceneName()).catch(() => "unknown"),
     adFallbackComplete: () => evalAgent((api) => api.adFallbackComplete()).catch(() => false),

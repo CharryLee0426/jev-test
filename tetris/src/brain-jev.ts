@@ -26,40 +26,53 @@ export interface JevBrainOptions {
 }
 
 const POSTURE_CRITERIA: Record<Posture, { what: string; right_when: string; not_for: string }> = {
-  build_for_tetris: {
-    what: "Keep stacking cleanly and keep one deep well open for the I piece, so four lines can be cleared at once.",
-    right_when: "The stack is low or moderate, there are no holes, and there is no urgent pressure.",
-    not_for: "A high stack, holes in the stack, or a level or score goal that is one or two lines away.",
+  build_tetris_well: {
+    what: "Stack the nine columns beside the well flat and level, and never put anything in the well column. Take no clear smaller than a tetris.",
+    right_when: "The default. The stack is below about twelve rows, the well is open and there are no holes worth digging out.",
+    not_for: "A stack near the top, or a well with a block in it that has to be dug out first.",
   },
-  clear_lines_now: {
-    what: "Take every line clear available, singles included, to bring the stack down or to finish the goal.",
-    right_when: "The stack is high, the pace is fast, or the next level or the target is only a few lines away.",
-    not_for: "A low, clean stack with time to build.",
+  cash_the_tetris: {
+    what: "Four rows are ready and an I piece is in hand or next: drop it in the well and take the tetris.",
+    right_when: "The well has four ready rows and an I piece is the live piece, the held piece or the next one.",
+    not_for: "Fewer than four ready rows, or no I piece in sight.",
+  },
+  survive_now: {
+    what: "Forget the well and the back-to-back chain; take whatever clear brings the stack down fastest.",
+    right_when: "The stack is dangerously high or the surface is so jagged that the next piece cannot be walked to where it is needed.",
+    not_for: "Any board that is still safe. This posture spends rows cheaply, and there are only 300 in the whole game.",
   },
   repair_surface: {
-    what: "Fill the holes and flatten a jagged surface before anything else.",
-    right_when: "There are buried holes or the surface is very jagged, and the stack is not yet dangerous.",
-    not_for: "A clean, flat stack, or a stack so high that only line clears can save the game.",
+    what: "Fill the holes and flatten the surface, keeping the well open, before going back to building.",
+    right_when: "There are buried holes, or the surface is jagged enough to trap the next piece, and the stack is not yet dangerous.",
+    not_for: "A clean flat stack, or a stack so high that only a clear will save it.",
   },
 };
 
 export function buildJevRequest(req: DecisionRequest) {
-  const criteria = Object.fromEntries(req.candidates.map((c) => [c.id, describeCandidate(c, req.pieces)])) as Record<string, CandidateDescription>;
+  const criteria = Object.fromEntries(req.candidates.map((c) => [c.id, describeCandidate(c, req.pieces, req.context)])) as Record<string, CandidateDescription>;
   const state = { objective: req.objective, situation: req.situation };
   const questions = {
     placement: {
       type: "choice" as const,
       instructions: {
         question: "Which placement should the live piece get right now?",
-        goal: "Keep the game alive and make progress on `objective`: clear lines, keep the stack low and solid, and leave the following piece a good spot.",
-        facts: "Each option's consequences were computed by simulating the placement exactly on the current board, then the following piece's best reply on the resulting board. Treat them as facts. `situation` describes the board and the pieces right now.",
+        goal: "Score as much as possible before the game ends, and do not end it early. `objective` says how far along that is.",
+        facts: "Each option's consequences were computed by simulating the placement exactly on the current board, then the following piece's best reply on the resulting board. The points in each option are what the game will actually add to the score. Only placements the piece can still be brought to at this level's gravity are listed. Treat all of it as facts. `situation` describes the board and the pieces right now.",
+        the_economics: [
+          "This game is 30 levels of 10 lines and then it ends, so only 300 lines will ever be cleared. What decides the score is what each line is paid, not how many are cleared.",
+          "A tetris pays 800 x level for four rows. A single pays 100 x level for one. Four singles therefore pay a third of what one tetris pays for the same four rows.",
+          "Two tetrises in a row with nothing in between pay half as much again for the second one, and every one after it. Clearing one, two or three lines breaks that chain.",
+          "So the whole game is: keep one column empty, stack the other nine flat and level, wait for an I piece, and clear four at a time, over and over.",
+        ],
         how_to_choose: [
           "Never choose an option whose risk says ENDS THE GAME while another option does not.",
-          "Prefer an option that clears lines without creating a new hole; a double beats a single, a triple beats a double, a tetris beats everything.",
-          "Among options without a line clear, prefer no new holes, then a lower stack, then a flatter surface.",
-          "When the stack is dangerously high or critical, prefer whatever brings it down fastest, even a single line.",
-          "When the stack is low and solid, keeping a deep well open for the I piece is good; filling it for no gain is bad.",
-          "Use a hold option only when the piece it brings out has a clearly better placement than the live piece.",
+          "A tetris is almost always the right answer when one is offered.",
+          "Otherwise prefer the option that adds ready rows to the well without creating a hole, and keeps the surface flat.",
+          "Refuse a single, double or triple unless the stack is genuinely dangerous: it pays badly and it breaks the back-to-back chain. Read the points field, which spells out what it costs.",
+          "Never put a block in the tetris well unless every other option is worse than that; it stops all scoring until it is dug out.",
+          "A new buried hole is worse than a slightly higher stack, because it has to be dug out before the well can be used again.",
+          "When the stack is dangerously high or critical, that overrides all of the above: take whatever brings it down fastest.",
+          "Use a hold option only when the piece it brings out has a clearly better placement, or to save an I piece for the well.",
           "When options are still similar, prefer the better next_piece_outlook.",
         ],
       },

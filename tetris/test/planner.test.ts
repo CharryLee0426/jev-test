@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chooseByCode, describeCandidate, describeSituation, heldInPiece, piecesAfter, planCandidates, postureWeights, type PiecesInPlay } from "../src/planner.ts";
+import { SHORTLIST_MARGIN, chooseByCode, describeCandidate, describeSituation, heldInPiece, piecesAfter, planCandidates, postureWeights, type PiecesInPlay } from "../src/planner.ts";
 import { emptyBoard, parseBoard } from "../src/tetris.ts";
 
 const pieces = (live: string, hold: string | null, queue: string, canHold = true): PiecesInPlay => ({ live: live as PiecesInPlay["live"], hold: hold as PiecesInPlay["hold"], canHold, queue: queue.split("") as PiecesInPlay["queue"] });
@@ -21,18 +21,44 @@ test("candidates are distinct, ranked, and include a hold option when allowed", 
     "####.#####",
   ]);
   const cands = planCandidates({ board, pieces: pieces("T", null, "IZO"), count: 6 });
-  assert.equal(cands.length, 6);
-  assert.deepEqual(cands.map((c) => c.id), ["option_1", "option_2", "option_3", "option_4", "option_5", "option_6"]);
+  assert.ok(cands.length >= 1 && cands.length <= 6);
+  assert.deepEqual(cands.map((c) => c.id), cands.map((_, i) => `option_${i + 1}`), "ids are numbered in rank order");
   for (let i = 1; i < cands.length; i++) assert.ok(cands[i - 1].total >= cands[i].total, "sorted by total");
   const keys = new Set(cands.map((c) => `${c.evaluation.placement.viaHold}:${c.evaluation.placement.orientation}:${c.evaluation.placement.x}`));
   assert.equal(keys.size, cands.length, "no duplicates");
-  const holdOption = cands.find((c) => c.evaluation.placement.viaHold);
-  assert.ok(holdOption, "a hold option is offered");
-  assert.equal(holdOption.evaluation.placement.type, "I");
   // Holding for the I and dropping it in the well clears two lines: code ranks it first.
   const best = chooseByCode(cands);
   assert.equal(best.evaluation.placement.viaHold, true);
   assert.equal(best.evaluation.lock.linesCleared, 2);
+});
+
+test("every option offered is a real contender: that is what stops one bad pick losing the game", () => {
+  // Measured in play: the model takes something other than the top-ranked
+  // option about 40% of the time. In simulation, offering options far below
+  // the best cost roughly two thirds of the score, because a wrong pick could
+  // be a losing move rather than a different opinion.
+  const board = parseBoard([
+    "#########.",
+    "#########.",
+    "####.#####",
+  ]);
+  for (const live of ["T", "I", "S", "O"]) {
+    const cands = planCandidates({ board, pieces: pieces(live, null, "IZO"), count: 6 });
+    const best = cands[0].total;
+    for (const c of cands.slice(1)) {
+      assert.ok(c.total >= best - SHORTLIST_MARGIN, `${live}: ${c.id} is ${(best - c.total).toFixed(1)} below the best, past the ${SHORTLIST_MARGIN} margin`);
+    }
+  }
+});
+
+test("when only one move is sane, only one is offered", () => {
+  // Padding the shortlist to a fixed length was the bug: it manufactured a
+  // choice by adding a move that loses the game.
+  const board = parseBoard(Array.from({ length: 17 }, () => "#########."));
+  const cands = planCandidates({ board, pieces: pieces("I", null, "TZO"), count: 6, context: { wellColumn: 9, level: 18, backToBack: true, combo: 0 } });
+  assert.ok(cands.length >= 1);
+  assert.equal(cands[0].evaluation.lock.linesCleared, 4, "the tetris is the move");
+  for (const c of cands) assert.equal(c.evaluation.lock.toppedOut, false, "nothing fatal is ever offered");
 });
 
 test("no hold option when holding is not allowed", () => {
@@ -57,7 +83,7 @@ test("descriptions are words with the numbers as detail", () => {
   assert.match(d.risk, /^safe/);
   const s = describeSituation(board, pieces("I", null, "TZO"), { level: 1, fallMsPerRow: 1000 });
   assert.match(s.board.stack_height, /very low/);
-  assert.match(s.board.wells, /2-deep|no deep well/);
+  assert.match(s.board.tetris_well, /none being kept/);
   assert.equal(s.pieces.live, "I (the straight four-long bar)");
   assert.match(s.pieces.hold, /^empty \(holding/);
   assert.equal(s.pieces.next, "T, then Z, then O (the square)");
@@ -77,9 +103,12 @@ test("a top-out is described as ending the game and never chosen by code when av
 });
 
 test("posture presets change the weights code ranks with", () => {
-  assert.ok(postureWeights("clear_lines_now").lines > postureWeights(null).lines);
-  assert.ok(postureWeights("repair_surface").holes < postureWeights(null).holes);
-  assert.ok(postureWeights("build_for_tetris").tetris > postureWeights(null).tetris);
+  // The default posture is the tetris build, so it is what the others move away from.
+  assert.ok(postureWeights("survive_now").lines > postureWeights(null).lines, "surviving takes clears the build refuses");
+  assert.ok(postureWeights("repair_surface").holes < postureWeights(null).holes, "repairing hates holes more");
+  assert.ok(postureWeights("cash_the_tetris").tetris > postureWeights(null).tetris, "cashing wants the four");
+  assert.ok(postureWeights(null).nonTetrisClear < 0, "the build taxes small clears");
+  assert.equal(postureWeights(null).erodedCells, 0, "the build earns nothing from partial clears");
 });
 
 test("a resting piece gets a sliding candidate in its current orientation only", async () => {

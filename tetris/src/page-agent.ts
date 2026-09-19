@@ -29,7 +29,7 @@ export interface PagePiece {
 }
 
 export type PageEvent =
-  | { type: "exec"; planId: number; ok: boolean; stage: string; reason?: string; elapsedMs: number; keys: number }
+  | { type: "exec"; planId: number; ok: boolean; stage: string; reason?: string; elapsedMs: number; keys: number; pieceId?: number; armed?: boolean }
   | { type: "start"; ok: boolean; reason?: string };
 
 export interface PageSnapshot {
@@ -44,6 +44,10 @@ export interface PageSnapshot {
   canHold: boolean;
   queue: string[];
   score: number;
+  /** True while a back-to-back chain is alive, so the next tetris scores 1.5x. The engine's own flag. */
+  backToBack: boolean;
+  /** Clears chained so far, for the combo bonus. The engine's own counter. */
+  combo: number;
   /** 0-based level index; the game shows index + 1. */
   level: number;
   linesToNext: number;
@@ -61,8 +65,19 @@ export interface PageSnapshot {
 
 export interface PagePlan {
   id: number;
-  /** The live piece the plan is for; refused if another piece is live. */
+  /** The live piece the plan is for; refused if another piece is live. -1 arms the plan for the next piece of `expectType`. */
   pieceId: number;
+  /** For an armed plan: the piece type it was computed for. The plan runs the frame a piece of this type becomes live. */
+  expectType?: string;
+  /** Presses the plan may spend before the piece locks itself; 0 or absent means no limit. */
+  maxKeys?: number;
+  /**
+   * For an armed plan: the matrix it was computed for, in the same form as
+   * `PageSnapshot.board`. The plan only fires if the board really came out
+   * that way, so a placement that went off target can never be followed by a
+   * plan built on a board that never happened.
+   */
+  expectBoard?: string;
   hold: boolean;
   /** Orientation of the target shape (0..3 clockwise turns from spawn). */
   orientation: number;
@@ -79,6 +94,13 @@ export interface PageAgentApi {
   execute(plan: PagePlan): void;
   press(key: "left" | "right" | "cw" | "ccw" | "soft" | "hard" | "hold"): void;
   startGame(levelIndex: number): { ok: boolean; reason?: string; scene: string };
+  /**
+   * Holds a plan for a piece that has not spawned yet and runs it the frame one
+   * of `expectType` becomes live. From level 20 a piece locks 150 ms after it
+   * appears, which is less than a round trip to Node, so the plan has to be
+   * waiting in the page before the spawn rather than sent after it.
+   */
+  arm(plan: PagePlan | null): void;
   sceneName(): string;
   /** Tells the page its game-area ad is over. Only the ad-timeout fallback uses it. */
   adFallbackComplete(): boolean;
@@ -232,6 +254,8 @@ export function installPageAgent(constants: PageConstants): { ok: boolean; reaso
       canHold: false,
       queue: [],
       score: 0,
+      backToBack: false,
+      combo: 0,
       level: 0,
       linesToNext: 0,
       elapsedMs: 0,
@@ -266,6 +290,9 @@ export function installPageAgent(constants: PageConstants): { ok: boolean; reaso
       base.canHold = ctrl ? Boolean(ctrl.canHoldLivePiece()) : liveId !== null && holdUsedFor !== liveId;
       base.queue = queue;
       base.score = comps.score ? Number(comps.score.getScore()) : 0;
+      // The score component keeps both of these itself, so they never have to be inferred.
+      base.backToBack = comps.score ? Boolean(comps.score.mIsBackToBackChainActive) : false;
+      base.combo = comps.score ? Math.max(0, Number(comps.score.mCurrentComboCount) || 0) : 0;
       base.level = comps.levels ? Number(comps.levels.getCurrentLevelIndex()) : 0;
       base.linesToNext = comps.levels ? Number(comps.levels.getLevelRemainingActionGoal()) : 0;
       base.elapsedMs = Math.round(pl.getElapsedActiveGameTimeMSEC());
@@ -305,6 +332,7 @@ export function installPageAgent(constants: PageConstants): { ok: boolean; reaso
     }
   };
   const loop = (): void => {
+    tryArmed();
     push(false);
     requestAnimationFrame(loop);
   };
@@ -331,14 +359,23 @@ export function installPageAgent(constants: PageConstants): { ok: boolean; reaso
     return cond();
   };
 
-  const execute = async (plan: PagePlan): Promise<void> => {
+  const execute = async (plan: PagePlan, armedFire = false): Promise<void> => {
     const started = performance.now();
     let keys = 0;
     const done = (ok: boolean, stage: string, reason?: string): void => {
-      pushEvent({ type: "exec", planId: plan.id, ok, stage, reason, elapsedMs: Math.round(performance.now() - started), keys });
+      pushEvent({ type: "exec", planId: plan.id, ok, stage, reason, elapsedMs: Math.round(performance.now() - started), keys, pieceId: plan.pieceId, armed: armedFire });
     };
     const pl = anyPlayer();
     if (!pl) return done(false, "start", "no player");
+    // From level 20 gravity is instant and the piece locks itself after a
+    // handful of presses, so the plan is allowed a fixed budget and has to
+    // spend it on the drop rather than on another verification round.
+    const budget = plan.maxKeys && plan.maxKeys > 0 ? plan.maxKeys : Infinity;
+    const outOfKeys = (): boolean => keys >= budget;
+    const instantGravity = (): boolean => {
+      const c = controller(pl);
+      return Boolean(c) && Number(c.getCurrentFallSpeedMSEC()) <= 0;
+    };
     const liveNow = (): any => {
       try {
         return pl.getLivePiece();
@@ -374,11 +411,12 @@ export function installPageAgent(constants: PageConstants): { ok: boolean; reaso
     if (shapeKey() !== plan.shapeKey) {
       const turns: ("cw" | "ccw")[] = plan.orientation === 3 ? ["ccw"] : plan.orientation === 2 ? ["cw", "cw"] : ["cw"];
       for (const t of turns) {
+        if (outOfKeys()) break;
         press(t);
         keys++;
         await wait();
       }
-      for (let extra = 0; shapeKey() !== plan.shapeKey && extra < 3; extra++) {
+      for (let extra = 0; shapeKey() !== plan.shapeKey && extra < 3 && !outOfKeys(); extra++) {
         press("cw");
         keys++;
         await wait();
@@ -390,7 +428,7 @@ export function installPageAgent(constants: PageConstants): { ok: boolean; reaso
       const l = liveNow();
       return l ? Math.min(...cellsOf(l)!.map((c) => c[0])) : -1;
     };
-    for (let guard = 0; guard < 12; guard++) {
+    for (let guard = 0; guard < 12 && !outOfKeys(); guard++) {
       if (!stillLive()) return done(false, "move", "piece locked while moving");
       const at = minX();
       const dx = plan.targetMinX - at;
@@ -399,6 +437,9 @@ export function installPageAgent(constants: PageConstants): { ok: boolean; reaso
       keys++;
       await wait();
       if (minX() === at) {
+        // A step that did not land is a wall. Under instant gravity that is the
+        // walk model being a column out; stop rather than spend the budget.
+        if (instantGravity()) break;
         await wait();
         if (minX() === at) return done(false, "move", `blocked at column ${at + 1} (wanted column ${plan.targetMinX + 1})`);
       }
@@ -407,16 +448,75 @@ export function installPageAgent(constants: PageConstants): { ok: boolean; reaso
     const ghost = pl.getGhostPiece();
     const ghostCells = cellsOf(ghost);
     const gk = ghostCells ? cellKey(ghostCells) : "";
-    if (gk !== plan.targetCells) return done(false, "verify", `ghost ${gk} does not match the target ${plan.targetCells}`);
+    if (gk !== plan.targetCells) {
+      // Under instant gravity the piece is already resting: not dropping only
+      // means it locks in the same cells a moment later. Drop it so the game
+      // keeps moving, and say so, because Node's board prediction is now void.
+      if (instantGravity()) {
+        press("hard");
+        keys++;
+        return done(true, "dropped-off-target", `ghost ${gk} does not match the target ${plan.targetCells}`);
+      }
+      return done(false, "verify", `ghost ${gk} does not match the target ${plan.targetCells}`);
+    }
     press("hard");
     keys++;
     done(true, "dropped");
   };
 
+  // A plan can be left waiting for a piece that has not spawned yet; the frame
+  // loop fires it the moment one of the expected type becomes live.
+  let armed: PagePlan | null = null;
+  let armedFiredFor: number | null = null;
+  const tryArmed = (): void => {
+    if (!armed) return;
+    const pl = anyPlayer();
+    if (!pl) return;
+    let live: any = null;
+    try {
+      live = pl.getLivePiece();
+    } catch {
+      return;
+    }
+    if (!live) return;
+    const id = Number(live.getRandomizedObjectId());
+    if (id === armedFiredFor) return;
+    if (armed.expectType && String(live.getPieceTypeName()) !== armed.expectType) return;
+    if (armed.expectBoard) {
+      let board = "";
+      try {
+        const w = pl.getMatrixWidth();
+        const h = pl.getMatrixHeight();
+        const m = pl.getMatrix();
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) board += m.getMinoAt(x, y) ? "#" : ".";
+      } catch {
+        return;
+      }
+      if (board !== armed.expectBoard) {
+        // The board is not the one the plan was built on: throw the plan away
+        // rather than place a piece by a prediction that did not come true.
+        // Say so, because Node may already be treating this plan as the one in
+        // flight, and a plan that never reports back stops it placing pieces.
+        const discarded = armed;
+        armed = null;
+        pushEvent({ type: "exec", planId: discarded.id, ok: false, stage: "armed-discarded", reason: "the board was not the one the plan was built on", elapsedMs: 0, keys: 0, pieceId: id, armed: true });
+        return;
+      }
+    }
+    const plan = { ...armed, pieceId: id };
+    armed = null;
+    armedFiredFor = id;
+    void execute(plan, true);
+  };
+
   const api: PageAgentApi = {
     snapshot,
     execute(plan) {
+      armed = null;
       void execute(plan);
+    },
+    arm(plan) {
+      armed = plan;
     },
     press,
     startGame(levelIndex) {

@@ -7,6 +7,7 @@
  * Coordinates follow the game engine: x from 0 (left) to 9, y from 0 (bottom
  * row) upwards; rows 20..23 are the hidden buffer above the visible matrix.
  */
+import { clearScore, fallMsForLevel, keepsBackToBack, perfectClearScore } from "./score.ts";
 
 export type PieceType = "I" | "O" | "T" | "S" | "Z" | "J" | "L";
 export const PIECE_TYPES: readonly PieceType[] = ["I", "O", "T", "S", "Z", "J", "L"];
@@ -167,6 +168,8 @@ export interface Placement {
   cells: Cell[];
   /** True when the piece is swapped in from hold (or the next piece when hold is empty) instead of the live piece. */
   viaHold: boolean;
+  /** Key presses the plan needs, when the reachability pass measured it. */
+  keys?: number;
 }
 
 /** Row where the shape comes to rest when dropped straight down from the top of the buffer; null when it cannot even enter. */
@@ -242,6 +245,8 @@ export interface BoardFeatures {
   bumpiness: number;
   /** Depth of each column relative to its lower neighbour (walls count as tall); a well is a column deeper than 1 on both sides. */
   wells: { column: number; depth: number }[];
+  /** Well depth per column, 0 when the column is not lower than its neighbours. Lets the tetris well be scored separately. */
+  wellDepths: number[];
   /** Cumulative well depth (Dellacherie): sum over wells of 1 + 2 + ... + depth. */
   wellSum: number;
   rowTransitions: number;
@@ -273,6 +278,7 @@ export function computeFeatures(b: Board): BoardFeatures {
   let bumpiness = 0;
   for (let x = 0; x + 1 < WIDTH; x++) bumpiness += Math.abs(heights[x] - heights[x + 1]);
   const wells: { column: number; depth: number }[] = [];
+  const wellDepths = new Array<number>(WIDTH).fill(0);
   let wellSum = 0;
   for (let x = 0; x < WIDTH; x++) {
     const left = x === 0 ? HEIGHT : heights[x - 1];
@@ -281,7 +287,10 @@ export function computeFeatures(b: Board): BoardFeatures {
     if (depth >= 2) {
       wells.push({ column: x, depth });
     }
-    if (depth > 0) wellSum += (depth * (depth + 1)) / 2;
+    if (depth > 0) {
+      wellDepths[x] = depth;
+      wellSum += (depth * (depth + 1)) / 2;
+    }
   }
   let rowTransitions = 0;
   for (let y = 0; y < VISIBLE_HEIGHT; y++) {
@@ -316,6 +325,7 @@ export function computeFeatures(b: Board): BoardFeatures {
     holeColumns,
     bumpiness,
     wells,
+    wellDepths,
     wellSum,
     rowTransitions,
     columnTransitions,
@@ -336,6 +346,37 @@ export interface Weights {
   lines: number;
   /** Bonus for a four-line clear. */
   tetris: number;
+  /** Weight on the points the clear actually scores, taken at level 1 so the balance does not drift with the level. */
+  points: number;
+  /** Bonus per row that is full except the tetris well: a row already paid for, waiting for an I. */
+  readyRows: number;
+  /** Penalty per cell sitting in the tetris well on a row that is not otherwise complete: it blocks the tetris. */
+  wellBlocked: number;
+  /** Penalty for a clear of one to three lines, which spends rows cheaply and drops the back-to-back chain. */
+  nonTetrisClear: number;
+  /** Penalty per unit of surface unevenness. A flat surface is what keeps the board reachable once gravity is fast. */
+  bumpiness: number;
+  /** Penalty on the square of how far the stack rises above `SAFE_HEIGHT`. Square, so danger grows faster than height. */
+  heightRisk: number;
+  /**
+   * Penalty for spending an I piece anywhere but the well while the well is
+   * usable. The I is the only piece that scores a tetris, and one arrives
+   * roughly every seven pieces, so laying one flat costs a whole tetris.
+   */
+  wasteI: number;
+  /**
+   * Penalty for leaving a board an I piece can no longer be walked to the well
+   * on. That is how games are lost: once the well is out of reach nothing can
+   * be cleared, the stack rises, and the rising stack cuts the reach further.
+   */
+  wellUnreachable: number;
+  /**
+   * Penalty per key press a plan needs, applied only once gravity is instant.
+   * Every step of a walk is a chance for the model of where the piece is to be
+   * a column out, and a walk that gets blocked ends with the piece locking
+   * somewhere nobody chose. Costs a little stacking quality to buy accuracy.
+   */
+  keyCost: number;
 }
 
 /** Dellacherie's weights (a strong hand-tuned survival heuristic), plus small extras for line clears. */
@@ -349,7 +390,151 @@ export const DEFAULT_WEIGHTS: Weights = {
   newHoles: -4,
   lines: 1,
   tetris: 12,
+  points: 0,
+  readyRows: 0,
+  wellBlocked: 0,
+  nonTetrisClear: 0,
+  bumpiness: 0,
+  heightRisk: 0,
+  wasteI: 0,
+  wellUnreachable: 0,
+  keyCost: 0,
 };
+
+/**
+ * The weights that actually chase 1,000,000. Marathon is 300 lines and no
+ * more, so what matters is not how many lines are cleared but what each one is
+ * worth: a back-to-back tetris pays 300 x level per line against 100 x level
+ * for a single. So partial clears earn nothing here (`erodedCells` and `lines`
+ * are 0) and are taxed (`nonTetrisClear`), rows stacked flat against the well
+ * are paid for in advance (`readyRows`), anything that caps the well is
+ * treated as nearly as bad as a hole, and an I piece spent anywhere but the
+ * well is charged the tetris it threw away.
+ *
+ * Every number here was measured with `--simulate`, not guessed. The ones that
+ * matter most, in order: guarding the well (`wellBlocked`, `nonTetrisClear`)
+ * was worth about 170,000; hoarding the I piece (`wasteI`) about 70,000; and
+ * capping `readyRows` at four -- see `READY_ROWS_PAID` -- was what stopped the
+ * agent building a tower to the ceiling while it waited for a piece that only
+ * ever clears four rows anyway.
+ */
+export const TETRIS_WEIGHTS: Weights = {
+  landingHeight: -3.0,
+  erodedCells: 0,
+  rowTransitions: -3.2,
+  columnTransitions: -9.3,
+  holes: -20,
+  wellSum: -1.0,
+  newHoles: -13,
+  lines: 0,
+  tetris: 80,
+  points: 0.02,
+  readyRows: 11,
+  wellBlocked: -60,
+  nonTetrisClear: -40,
+  bumpiness: -1.2,
+  heightRisk: -1.5,
+  wasteI: -45,
+  wellUnreachable: -45,
+  keyCost: -1.0,
+};
+
+/**
+ * How tall the stack may get before height starts to dominate everything else,
+ * when there is time to place pieces freely. A tetris only ever takes four
+ * rows off, so a stack much above this cannot be brought back down by the
+ * strategy alone.
+ */
+export const SAFE_HEIGHT = 13;
+
+/**
+ * The same limit, but against the clock. A piece can only be steered while it
+ * is in the air, and the air is whatever is left between the spawn rows and
+ * the top of the stack. So the faster gravity gets, the lower the stack has to
+ * be kept to keep the board reachable at all.
+ */
+export function safeHeightFor(fallMsPerRow: number): number {
+  if (fallMsPerRow >= 300) return SAFE_HEIGHT;
+  if (fallMsPerRow >= 100) return 11;
+  if (fallMsPerRow >= 30) return 9;
+  if (fallMsPerRow >= 10) return 8;
+  return 7;
+}
+
+/** Ready rows beyond this are just stack height: one tetris only ever clears four. */
+export const READY_ROWS_PAID = 4;
+
+export interface WellStats {
+  column: number;
+  /** Rows that are full except the well column: an I dropped in clears them all. */
+  readyRows: number;
+  /** Filled cells in the well column on rows that are not otherwise complete. Each one blocks a tetris. */
+  blocked: number;
+  /** Empty cells in the well column below the surrounding stack, i.e. how deep the well runs. */
+  depth: number;
+}
+
+/** How the board stands against a well in `column`. */
+export function wellStats(b: Board, column: number): WellStats {
+  let readyRows = 0;
+  let blocked = 0;
+  for (let y = 0; y < VISIBLE_HEIGHT; y++) {
+    let othersFull = true;
+    for (let x = 0; x < WIDTH; x++) {
+      if (x === column) continue;
+      if (!b[y * WIDTH + x]) { othersFull = false; break; }
+    }
+    const wellFilled = Boolean(b[y * WIDTH + column]);
+    if (othersFull && !wellFilled) readyRows++;
+    if (wellFilled && !othersFull) blocked++;
+  }
+  const heights = columnHeights(b);
+  const around = heights.filter((_, x) => x !== column);
+  const depth = Math.max(0, Math.min(...around) - heights[column]);
+  return { column, readyRows, blocked, depth };
+}
+
+/**
+ * Which column to keep open. An edge is worth a lot: a well against a wall has
+ * only one neighbour to stack against, and at 20G no piece ever has to be
+ * walked across it. The column already lowest wins; `preferred` keeps the
+ * choice stable from piece to piece unless it has been buried.
+ */
+export function chooseWellColumn(b: Board, preferred?: number): number {
+  const heights = columnHeights(b);
+  const score = (x: number): number => {
+    const stats = wellStats(b, x);
+    const edge = x === 0 || x === WIDTH - 1 ? 6 : 0;
+    return edge + stats.readyRows * 3 + stats.depth - heights[x] - stats.blocked * 4;
+  };
+  if (preferred !== undefined && preferred >= 0 && preferred < WIDTH) {
+    const current = wellStats(b, preferred);
+    // Moving the well throws away every row already stacked against it, so it
+    // only happens when the current one has been buried and has nothing banked.
+    if (current.blocked === 0 || current.readyRows > 0) return preferred;
+    const best = [0, WIDTH - 1].reduce((a, x) => (score(x) > score(a) ? x : a), 0);
+    return score(best) > score(preferred) + 25 ? best : preferred;
+  }
+  let best = WIDTH - 1;
+  for (let x = 0; x < WIDTH; x++) if (score(x) > score(best)) best = x;
+  return best;
+}
+
+/** What the placement is being judged against: the well, the level and the chain. */
+export interface EvalContext {
+  /** Column kept open for the I piece; -1 turns the tetris terms off. */
+  wellColumn: number;
+  /** Level being played (1-based), for the points a clear is worth. */
+  level: number;
+  /** True when the next tetris would score 1.5x. */
+  backToBack: boolean;
+  /** Clears chained so far, for the combo bonus. */
+  combo: number;
+  /** Gravity in ms per row. It sets how tall the stack may safely get, because it sets how far a piece can still be steered. */
+  fallMs?: number | null;
+}
+
+export const NO_CONTEXT: EvalContext = { wellColumn: -1, level: 1, backToBack: false, combo: 0 };
 
 export interface Evaluation {
   placement: Placement;
@@ -360,31 +545,101 @@ export interface Evaluation {
   landingHeight: number;
   newHoles: number;
   score: number;
+  /** Points the game awards for this placement: the clear (with the level and back-to-back multipliers) plus the hard drop. */
+  points: number;
+  /** True when the placement leaves the back-to-back chain alive (it clears four, or clears nothing). */
+  keepsChain: boolean;
+  /** The well before and after, when a well column was given. */
+  well: { before: WellStats; after: WellStats } | null;
+  /** Key presses the plan needs, filled in by the reachability pass; null when it was not measured. */
+  keys: number | null;
+  /** Set by the planner when this placement would leave the well unreachable for an I piece. */
+  wellOutOfReach?: boolean;
 }
 
-export function evaluatePlacement(b: Board, before: BoardFeatures, p: Placement, w: Weights = DEFAULT_WEIGHTS): Evaluation {
+export function evaluatePlacement(b: Board, before: BoardFeatures, p: Placement, w: Weights = DEFAULT_WEIGHTS, ctx: EvalContext = NO_CONTEXT): Evaluation {
   const lock = lockPiece(b, p);
   const after = computeFeatures(lock.board);
   const ys = p.cells.map((c) => c.y);
   const landingHeight = (Math.min(...ys) + Math.max(...ys)) / 2 + 0.5;
   const newHoles = Math.max(0, after.holes - before.holes);
+  const lines = lock.linesCleared;
+  const well = ctx.wellColumn >= 0 ? { before: wellStats(b, ctx.wellColumn), after: wellStats(lock.board, ctx.wellColumn) } : null;
+  // A well the strategy is keeping open must not be counted as a defect by the
+  // generic well term, or every placement would try to fill it in.
+  const keptWellDepth = ctx.wellColumn >= 0 ? after.wellDepths[ctx.wellColumn] : 0;
+  const wellSumOutsideTheWell = after.wellSum - (keptWellDepth * (keptWellDepth + 1)) / 2;
+  // What the game will actually add to the score for this placement. Hard-drop
+  // points depend on how far the piece falls, which is a handful of points and
+  // never worth choosing on, so they are left out.
+  // A clear that leaves nothing behind is paid a large bonus on top.
+  const perfectClear = lines > 0 && after.aggregateHeight === 0;
+  const points = clearScore(lines, ctx.level, ctx.backToBack, ctx.combo) + (perfectClear ? perfectClearScore(lines, ctx.level, ctx.backToBack) : 0);
   let score =
     w.landingHeight * landingHeight +
-    w.erodedCells * lock.linesCleared * lock.erodedCells +
+    w.erodedCells * lines * lock.erodedCells +
     w.rowTransitions * after.rowTransitions +
     w.columnTransitions * after.columnTransitions +
     w.holes * after.holes +
-    w.wellSum * after.wellSum +
+    w.wellSum * wellSumOutsideTheWell +
     w.newHoles * newHoles +
-    w.lines * lock.linesCleared +
-    (lock.linesCleared === 4 ? w.tetris : 0);
+    w.lines * lines +
+    (lines === 4 ? w.tetris : 0);
+  // Points at level 1, so the same weights behave the same way on level 3 and
+  // on level 28; the level multiplier is common to every option anyway.
+  if (w.points !== 0) score += w.points * (clearScore(lines, 1, ctx.backToBack, 0) + (perfectClear ? perfectClearScore(lines, 1, ctx.backToBack) : 0));
+  if (well) {
+    // Only the first four ready rows are paid for. Beyond that they are not
+    // progress towards anything -- a tetris still only clears four -- they are
+    // just stack height, and rewarding them builds a tower to the ceiling.
+    const paid = (n: number): number => Math.min(READY_ROWS_PAID, n);
+    score += w.readyRows * (paid(well.after.readyRows) - paid(well.before.readyRows));
+    score += w.wellBlocked * (well.after.blocked - well.before.blocked);
+    if (lines > 0 && lines < 4) score += w.nonTetrisClear;
+  }
+  // An I laid flat while the well is open and waiting is a tetris thrown away.
+  // Holding it instead costs nothing, because the piece hold brings out has to
+  // be placed anyway.
+  if (well && w.wasteI !== 0 && p.type === "I" && lines < 4 && well.before.blocked === 0) {
+    const usesTheWell = p.cells.some((c) => c.x === ctx.wellColumn);
+    if (!usesTheWell) score += w.wasteI;
+  }
+  if (w.keyCost !== 0 && p.keys !== undefined && (ctx.fallMs ?? fallMsForLevel(ctx.level)) <= 0) score += w.keyCost * p.keys;
+  score += w.bumpiness * after.bumpiness;
+  // Height risk is squared, so it is nearly free while the stack is low and
+  // overwhelms the strategy once it is not.
+  const over = Math.max(0, after.maxHeight - safeHeightFor(ctx.fallMs ?? fallMsForLevel(ctx.level)));
+  score += w.heightRisk * over * over;
   if (lock.toppedOut) score -= 10_000;
-  return { placement: p, lock, before, after, landingHeight, newHoles, score };
+  return {
+    placement: p,
+    lock,
+    before,
+    after,
+    landingHeight,
+    newHoles,
+    score,
+    points,
+    keepsChain: lines === 0 || keepsBackToBack(lines),
+    well,
+    keys: null,
+  };
 }
 
 /** All placements of `type` on `b`, evaluated and sorted best first. */
-export function evaluateAll(b: Board, type: PieceType, w: Weights = DEFAULT_WEIGHTS, viaHold = false, before = computeFeatures(b)): Evaluation[] {
+export function evaluateAll(b: Board, type: PieceType, w: Weights = DEFAULT_WEIGHTS, viaHold = false, before = computeFeatures(b), ctx: EvalContext = NO_CONTEXT): Evaluation[] {
   return enumeratePlacements(b, type, viaHold)
-    .map((p) => evaluatePlacement(b, before, p, w))
+    .map((p) => evaluatePlacement(b, before, p, w, ctx))
+    .sort((a, c) => c.score - a.score);
+}
+
+/** Evaluates placements that were already filtered for reachability, keeping each one's key cost. */
+export function evaluateReachable(b: Board, placements: readonly (Placement & { keys?: number })[], w: Weights, before: BoardFeatures, ctx: EvalContext): Evaluation[] {
+  return placements
+    .map((p) => {
+      const ev = evaluatePlacement(b, before, p, w, ctx);
+      ev.keys = p.keys ?? null;
+      return ev;
+    })
     .sort((a, c) => c.score - a.score);
 }

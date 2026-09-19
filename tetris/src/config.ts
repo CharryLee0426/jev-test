@@ -5,6 +5,7 @@
  * ("target-level") or camelCase ("targetLevel").
  */
 import { readFileSync } from "node:fs";
+import { MAX_LEVEL, bestRemainingScore, clearScore, linesLeftInGame } from "./score.ts";
 
 export interface AgentConfig {
   model?: string;
@@ -49,7 +50,7 @@ export interface AgentConfig {
 
 export const DEFAULT_CONFIG: AgentConfig = {
   targetLevel: 0,
-  targetScore: 0,
+  targetScore: 1_000_000,
   maxSeconds: 0,
   runs: 0,
   linger: 3,
@@ -151,12 +152,35 @@ export function describeStopConditions(c: AgentConfig): string {
   return parts.length === 0 ? "play until Ctrl+C" : `stop at the first of: ${parts.join(", ")}`;
 }
 
-/** The objective in words, for the model's state. */
-export function describeObjective(c: AgentConfig, now: { level: number; score: number; linesToNextLevel: number; secondsLeft: number | null }): string {
+/**
+ * The objective in words, for the model's state. It is written so the model
+ * can see the arithmetic it is up against: the game is 300 lines long, the
+ * target needs a certain number of tetrises, and there is a ceiling below
+ * which it stops being reachable at all.
+ */
+export function describeObjective(
+  c: AgentConfig,
+  now: { level: number; score: number; linesToNextLevel: number; secondsLeft: number | null; backToBack?: boolean },
+): string {
+  const n = (v: number): string => v.toLocaleString("en-US");
   const parts: string[] = [];
-  if (c.targetLevel > 0) parts.push(`reach level ${c.targetLevel} (now level ${now.level}, ${now.linesToNextLevel} more line${now.linesToNextLevel === 1 ? "" : "s"} to the next level); every line cleared counts, but a top-out ends the game`);
-  if (c.targetScore > 0) parts.push(`reach a score of ${c.targetScore} (now ${now.score}); clearing several lines at once scores far more than singles (a tetris, four lines at once, scores the most), and a top-out ends the game`);
-  if (c.maxSeconds > 0) parts.push(`keep the game alive for the whole session${now.secondsLeft === null ? "" : ` (${now.secondsLeft}s left)`}; survival matters more than points`);
-  if (parts.length === 0) parts.push("keep the game alive as long as possible while clearing lines; a top-out ends the game");
+  if (c.targetScore > 0) {
+    const missing = Math.max(0, c.targetScore - now.score);
+    const linesLeft = linesLeftInGame(now.level, now.linesToNextLevel);
+    const ceiling = bestRemainingScore(now.level, now.linesToNextLevel, now.backToBack ?? false);
+    const perTetris = clearScore(4, now.level, now.backToBack ?? false, 0);
+    parts.push(
+      `score ${n(c.targetScore)} before the game ends (now ${n(now.score)}, ${n(missing)} still needed). ` +
+        `The game is ${MAX_LEVEL} levels of 10 lines and then it stops, so only ${n(linesLeft)} more line${linesLeft === 1 ? "" : "s"} will ever be cleared. ` +
+        `Clearing every one of them four at a time, back to back, is worth about ${n(ceiling)} from here, so the target ` +
+        (ceiling >= missing
+          ? `is still reachable, but only with tetrises: at level ${now.level} one pays ${n(perTetris)} and a single pays ${n(clearScore(1, now.level, false, 0))}.`
+          : `can no longer be reached even with perfect play; score as much as possible and keep the game alive.`),
+    );
+  }
+  if (c.targetLevel > 0) parts.push(`reach level ${c.targetLevel} (now level ${now.level}, ${now.linesToNextLevel} more line${now.linesToNextLevel === 1 ? "" : "s"} to the next level)`);
+  if (c.maxSeconds > 0 && now.secondsLeft !== null) parts.push(`the session stops in ${now.secondsLeft}s whatever happens`);
+  if (parts.length === 0) parts.push(`score as much as possible in the ${linesLeftInGame(now.level, now.linesToNextLevel)} lines the game has left; a tetris pays ${n(clearScore(4, now.level, now.backToBack ?? false, 0))} at level ${now.level} against ${n(clearScore(1, now.level, false, 0))} for a single`);
+  parts.push("a top-out ends the game immediately and forfeits every line that is left");
   return parts.join("; ");
 }

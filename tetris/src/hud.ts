@@ -15,15 +15,19 @@ export function renderStatus(s: AgentStatus): string {
   const parts = [
     `game ${s.run}`,
     s.phase,
-    `score ${s.score}`,
+    `score ${s.score.toLocaleString("en-US")}`,
     `level ${s.level} (${s.linesToNext} to next)`,
     `pieces ${s.pieces} lines ${s.lines}`,
+    // The strategy at a glance: the column being kept open, how close the next
+    // tetris is, and whether the chain that pays for it is still alive.
+    `well c${s.wellColumn} ready ${s.readyRows}/4${s.backToBack ? " b2b" : ""}`,
+    s.toTarget > 0 ? `need ${s.toTarget.toLocaleString("en-US")} (ceiling ${s.ceiling.toLocaleString("en-US")})` : "target met",
     goal.length ? `goal ${goal.join(", ")}` : "goal none",
     `${s.brain}`,
     `rtt ${Math.round(s.latencyP50)}/${Math.round(s.latencyP90)}ms`,
     `${s.requestsPerSecond.toFixed(1)} req/s`,
     `applied ${pct(st.applied, st.answers)} preplanned ${st.preplanHits}/${st.preplanHits + st.preplanMisses} stale ${st.stale} late ${st.late} veto ${st.vetoed} err ${st.errors}`,
-    `placed jev ${st.placedByJev} code ${st.placedByCode} failed ${st.execFailed}`,
+    `placed jev ${st.placedByJev} code ${st.placedByCode} failed ${st.execFailed} off-target ${st.offTarget}${st.stalls?` stalls ${st.stalls}`:""}`,
     `last ${s.lastChoice ?? "-"}${conf}${posture}`,
   ];
   if (s.adMessage) parts.push(`ads: ${s.adMessage}`);

@@ -1,4 +1,5 @@
 import type { Candidate, PiecesInPlay, Posture, Situation } from "./planner.ts";
+import type { EvalContext } from "./tetris.ts";
 
 export interface DecisionRequest {
   /** Identifies the piece the request is about (the game's live piece id, or the predicted next one). */
@@ -7,6 +8,8 @@ export interface DecisionRequest {
   objective: string;
   candidates: Candidate[];
   pieces: PiecesInPlay;
+  /** The well, level and back-to-back chain the options were judged against; the descriptions quote it. */
+  context: EvalContext;
 }
 
 export interface Decision {

@@ -1,8 +1,9 @@
 {
   "_comment": "Settings for jev-tetris-agent. CLI flags override these. Keys use the CLI flag names.",
+  "_strategy": "Marathon is 30 levels of 10 lines and then it ends, so 300 lines is the whole game and only back-to-back tetrises reach 1,000,000. That needs the full 300 lines, so a run starts at level 1 with no time limit.",
   "target-level": 0,
-  "target-score": 0,
-  "max-seconds": 120,
+  "target-score": 1000000,
+  "max-seconds": 0,
   "runs": 0,
   "start-level": 1,
   "candidates": 6,

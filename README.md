@@ -36,10 +36,16 @@ node play.ts flappy-bird --target-score 20     # game options pass straight thro
 node play.ts flappy-bird --play-seconds 60
 node play.ts flappy-bird --help                # every option of that game
 npm run flappy-bird -- --target-score 30       # same thing through npm
-node play.ts tetris --target-level 5           # Tetris: stop when a game reaches level 5
-node play.ts tetris --target-score 30000       # ...or a score
-node play.ts tetris --play-seconds 120         # ...or after two minutes
+node play.ts tetris                             # Tetris: play until a game scores 1,000,000
+node play.ts tetris --play-seconds 120          # ...or just play for two minutes
+node play.ts tetris --simulate 20               # ...or play 20 marathons offline, no browser, no key
 ```
+
+Tetris marathon is 30 levels of 10 lines and then it ends, so the score is bounded: 1,385,600 is the
+most the game allows, and only back-to-back tetrises get anywhere near it (a tetris pays three times
+what singles pay for the same four rows). The agent keeps one column open, stacks the other nine flat
+and spends every I piece on a tetris. From level 20 gravity is instant and a piece locks 150 ms after
+it appears, so plans are armed inside the page to run on the spawn frame. See `tetris/README.md`.
 
 The Tetris site shows ads on the page, over the game area and before every game. They are removed in
 code (blocked traffic plus shims that answer the site's own ad callbacks), so no ad loads and nothing
